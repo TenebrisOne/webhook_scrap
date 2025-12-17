@@ -8,26 +8,30 @@ import requests
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-
-from odoo_rpc import post_write_multi, read_fields
 from datetime import datetime, timezone
 
+# Odoo RPC (de tu proyecto)
+from odoo_rpc import post_write_multi, read_fields
+
+# -------------------- Flask / logging --------------------
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = app.logger
 
-# -------- Config --------
+# -------------------- Config --------------------
 SOCRATA_URL = os.getenv("SOCRATA_URL", "https://www.datos.gov.co/resource/c82u-588k.json")
 SOCRATA_APP_TOKEN = os.getenv("SOCRATA_APP_TOKEN")
+
 RUES_DETALLE_URLS = [
     os.getenv("RUES_DETALLE_URL", "https://ruesapi.rues.org.co/WEB2/api/Expediente/DetalleRM/{}"),
     "https://ruesapi.rues.org.co/WEB/api/Expediente/DetalleRM/{}",
 ]
 RUES_BASE_WEB = os.getenv("RUES_BASE_WEB", "https://www.rues.org.co")
+
 TIMEOUT = int(os.getenv("TIMEOUT", "12"))
 RUES_UA = os.getenv("RUES_USER_AGENT", "Mozilla/5.0 (RUES-Scraper/1.0)")
 
-# Campos Odoo destino (ajústalos por ENV si difieren)
+# Campos Odoo destino (defaults alineados a tu JSON que sí funciona)
 ODOO_FIELD_NOMBRE_COMERCIAL = os.getenv("ODOO_FIELD_NOMBRE_COMERCIAL", "x_studio_nombre_comercial")
 ODOO_FIELD_FECHA_MATRICULA = os.getenv("ODOO_FIELD_FECHA_MATRICULA", "x_studio_fecha_de_matricula")
 ODOO_FIELD_CIIU = os.getenv("ODOO_FIELD_CIIU", "x_studio_ciiu")
@@ -41,7 +45,7 @@ SESSION_HEADERS = {
     "Referer": f"{RUES_BASE_WEB}/",
 }
 
-# -------- Helpers --------
+# -------------------- Helpers NIT --------------------
 def only_digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
@@ -60,36 +64,43 @@ def extract_nit_from_payload(data: Dict[str, Any]) -> Optional[str]:
         return vat.strip()
     return None
 
+# -------------------- Utils fechas / campos --------------------
 def _to_iso_date(value: Any) -> Optional[str]:
     if not value:
         return None
     s = str(value).strip()
-    from datetime import datetime, timezone
-    try:
+    try:  # ISO
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
         return dt.date().isoformat()
     except Exception:
         pass
     m = re.match(r"^/Date\((\d+)\)/$", s)
-    if m:
+    if m:  # /Date(ms)/
         try:
             ms = int(m.group(1))
             dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
             return dt.date().isoformat()
         except Exception:
             pass
-    if s.isdigit():
+    if s.isdigit():  # epoch
         try:
             val = int(s)
             dt = datetime.fromtimestamp(val / 1000 if val > 10_000_000_000 else val, tz=timezone.utc)
             return dt.date().isoformat()
         except Exception:
             pass
-    try:
+    try:  # dd/mm/yyyy
         return datetime.strptime(s, "%d/%m/%Y").date().isoformat()
     except Exception:
         return None
 
+def _first_nonempty_str(*vals: Any) -> Optional[str]:
+    for v in vals:
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+# -------------------- Socrata / RUES API --------------------
 def socrata_headers() -> Dict[str, str]:
     return {"X-App-Token": SOCRATA_APP_TOKEN} if SOCRATA_APP_TOKEN else {}
 
@@ -121,7 +132,7 @@ def unwrap_rues_registro(js: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(regs, list) and regs:
             reg = regs[0]
             return reg if isinstance(reg, dict) else {}
-        if isinstance(regs, dict):
+        if isinstance(regs, dict) and regs:
             return regs
     if "registro" in js and isinstance(js["registro"], dict):
         return js["registro"]
@@ -143,12 +154,7 @@ def fetch_rues_detalle_api(id_rm: str) -> Dict[str, Any]:
             log.warning({"event": "rues_detalle_error", "url": url, "error": str(e)})
     return {}
 
-def _first_nonempty_str(*vals: Any) -> Optional[str]:
-    for v in vals:
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return None
-
+# -------------------- Extracción campos (robusto) --------------------
 def extract_name_sigla(detalle: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     empresa = detalle.get("empresa") if isinstance(detalle.get("empresa"), dict) else None
     razon_social = _first_nonempty_str(
@@ -174,7 +180,7 @@ def extract_rues_extras(detalle: Dict[str, Any]) -> Dict[str, Optional[str]]:
         fecha = _first_nonempty_str(emp.get("fechaMatricula"), emp.get("fechaInscripcion"), emp.get("fechaConstitucion"))
     fecha_iso = _to_iso_date(fecha)
 
-    # ciiu
+    # CIIU
     ciiu_code: Optional[str] = None
     posibles = [detalle.get("actividadesEconomicas"), detalle.get("actividades"), detalle.get("actividadEconomica")]
     if not any(posibles) and isinstance(detalle.get("empresa"), dict):
@@ -192,7 +198,7 @@ def extract_rues_extras(detalle: Dict[str, Any]) -> Dict[str, Optional[str]]:
             if ciiu_code:
                 break
 
-    # representante
+    # Representante
     rep: Optional[str] = None
     candidatos = [
         detalle.get("representantesLegales"),
@@ -211,8 +217,8 @@ def extract_rues_extras(detalle: Dict[str, Any]) -> Dict[str, Optional[str]]:
                 if not isinstance(p, dict):
                     continue
                 nombre = _first_nonempty_str(p.get("nombre"), p.get("nombreCompleto"), p.get("razonSocial"), p.get("nombres"))
+                rol = _first_nonempty_str(p.get("rol"), p.get("cargo"), p.get("tipo"))
                 if nombre:
-                    rol = _first_nonempty_str(p.get("rol"), p.get("cargo"), p.get("tipo"))
                     if (rol or "").lower().find("represent") >= 0:
                         nombres.append(nombre)
                     elif not nombres:
@@ -222,11 +228,62 @@ def extract_rues_extras(detalle: Dict[str, Any]) -> Dict[str, Optional[str]]:
             if nombre:
                 nombres.append(nombre)
     if nombres:
-        rep = ", ".join(dict.fromkeys([n.strip() for n in nombres if n]).keys())  # únicos y orden
+        # únicos y orden
+        rep = ", ".join(dict.fromkeys([n.strip() for n in nombres if n]).keys())
 
     return {"fecha_matricula": fecha_iso, "ciiu": ciiu_code, "representante_legal": rep}
 
-# ---- HTML fallback para representante y CIIU ----
+# Búsqueda de CIIU en cualquier parte del JSON (por si RUES cambia)
+_CIIU_KEY_RE = re.compile(r"(ciiu|actividad|codigo.*ciiu)", re.I)
+_CIIU_VAL_RE = re.compile(r"\b(\d{4})\b")
+_REP_KEY_RE = re.compile(r"represent", re.I)
+_NAME_KEYS = ("nombreCompleto", "nombre", "razonSocial", "nombres")
+
+def _iter_kv(obj):
+    def _recur(cur, path):
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                p = (*path, k)
+                yield p, k, v
+                yield from _recur(v, p)
+        elif isinstance(cur, list):
+            for i, v in enumerate(cur):
+                p = (*path, f"[{i}]")
+                yield from _recur(v, p)
+    yield from _recur(obj, ())
+
+def find_first_ciiu_anywhere(registro: Dict[str, Any]) -> Optional[str]:
+    for _, k, v in _iter_kv(registro):
+        if isinstance(v, str) and _CIIU_KEY_RE.search(k or ""):
+            m = _CIIU_VAL_RE.search(v)
+            if m:
+                return m.group(1)
+        if isinstance(v, dict) and _CIIU_KEY_RE.search(k or ""):
+            for __, kk, vv in _iter_kv(v):
+                if isinstance(vv, str):
+                    m = _CIIU_VAL_RE.search(vv)
+                    if m:
+                        return m.group(1)
+        if isinstance(v, list) and _CIIU_KEY_RE.search(k or ""):
+            for item in v:
+                if isinstance(item, dict):
+                    for __, kk, vv in _iter_kv(item):
+                        if isinstance(vv, str):
+                            m = _CIIU_VAL_RE.search(vv)
+                            if m:
+                                return m.group(1)
+                elif isinstance(item, str):
+                    m = _CIIU_VAL_RE.search(item)
+                    if m:
+                        return m.group(1)
+    for __, __k, val in _iter_kv(registro):
+        if isinstance(val, str):
+            m = _CIIU_VAL_RE.search(val)
+            if m:
+                return m.group(1)
+    return None
+
+# -------------------- HTML fallbacks --------------------
 def find_value_by_label_in_soup(soup: BeautifulSoup, label_regex: str) -> Optional[str]:
     lbl = soup.find(string=re.compile(label_regex, re.I))
     if not lbl:
@@ -242,15 +299,12 @@ def find_value_by_label_in_soup(soup: BeautifulSoup, label_regex: str) -> Option
 
 def _extract_representante_from_soup(soup: BeautifulSoup) -> Optional[str]:
     text = soup.get_text("\n", strip=True)
-    # Busca filas tipo "Representación legal" o tablas con "Cargo / Nombre"
     m = re.search(r"Representaci[oó]n\s+legal.*?\n(.*)", text, re.I | re.S)
     if m:
         block = m.group(1)[:800]
-        # Primer nombre propio con varias palabras en mayúscula inicial
         nm = re.search(r"([A-ZÁÉÍÓÚÑ][a-záéíóúñ']+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ']+){1,4})", block)
         if nm:
             return nm.group(1).strip()
-    # Tablas
     for tr in soup.find_all("tr"):
         row = " ".join(td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"]))
         if re.search(r"represent", row, re.I):
@@ -258,6 +312,108 @@ def _extract_representante_from_soup(soup: BeautifulSoup) -> Optional[str]:
             if nm:
                 return nm.group(1).strip()
     return None
+
+def fetch_detail_from_html(nit_base: str) -> Dict[str, Optional[str]]:
+    session = requests.Session()
+    session.headers.update(SESSION_HEADERS)
+    search_url = f"{RUES_BASE_WEB}/buscar/RM/{nit_base}"
+    r = session.get(search_url, timeout=TIMEOUT)
+    log.info({"event": "html_search_http", "url": search_url, "status": r.status_code})
+    if r.status_code != 200:
+        return {}
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    razon_social = None
+    title = soup.select_one("p.font-rues-large.filtro__titulo")
+    if title:
+        razon_social = title.get_text(strip=True)
+
+    detail_href = None
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        txt = (a.get_text() or "").strip().lower()
+        if "/detalle/" in href or "ver información" in txt or "ver informacion" in txt:
+            detail_href = href
+            break
+    if not detail_href:
+        el = soup.find(attrs={"data-href": True})
+        if el and "/detalle/" in el.get("data-href", ""):
+            detail_href = el["data-href"]
+    if not detail_href:
+        for el in soup.find_all(attrs={"onclick": True}):
+            oc = el.get("onclick") or ""
+            m = re.search(r"['\"](/detalle/[^'\"]+)['\"]", oc)
+            if m:
+                detail_href = m.group(1)
+                break
+    if not detail_href:
+        return {"razon_social": razon_social}
+
+    detail_url = urljoin(RUES_BASE_WEB, detail_href)
+    r2 = session.get(detail_url, timeout=TIMEOUT)
+    log.info({"event": "html_detail_http", "url": detail_url, "status": r2.status_code})
+    if r2.status_code != 200:
+        return {"razon_social": razon_social}
+
+    s2 = BeautifulSoup(r2.text, "html.parser")
+
+    name_detail = None
+    for sel in ["h1", "h2", "p.font-rues-large.filtro__titulo"]:
+        el = s2.select_one(sel)
+        if el and el.get_text(strip=True):
+            name_detail = el.get_text(strip=True)
+            break
+    razon_social = razon_social or name_detail
+
+    sigla = find_value_by_label_in_soup(s2, r"^\s*sigla\s*$") or find_value_by_label_in_soup(s2, r"sigla")
+    fecha = (find_value_by_label_in_soup(s2, r"fecha\s+de\s+matr[íi]cula")
+             or find_value_by_label_in_soup(s2, r"fecha\s+de\s+inscripci[óo]n")
+             or find_value_by_label_in_soup(s2, r"fecha\s+de\s+constituci[óo]n"))
+    fecha_iso = _to_iso_date(fecha)
+
+    ciiu = None
+    act_label = s2.find(string=re.compile(r"^\s*Actividad\s+econ[oó]mica\s*$", re.I))
+    act_container = None
+    if act_label:
+        cand = getattr(act_label, "parent", None)
+        for _ in range(4):
+            if not cand:
+                break
+            if getattr(cand, "name", None) in ("section", "div", "article"):
+                act_container = cand
+            cand = getattr(cand, "parent", None)
+    if act_container:
+        a_code = act_container.find("a", string=re.compile(r"^\s*\d{4}\s*$"))
+        if a_code:
+            m = re.findall(r"\d{4}", a_code.get_text())
+            if m:
+                ciiu = m[0]
+        if not ciiu:
+            m = re.search(r"\b(\d{4})\b", act_container.get_text(" ", strip=True))
+            if m:
+                ciiu = m.group(1)
+    if not ciiu:
+        a_code = s2.find("a", string=re.compile(r"^\s*\d{4}\s*$"))
+        if a_code:
+            m = re.findall(r"\d{4}", a_code.get_text())
+            if m:
+                ciiu = m[0]
+    if not ciiu:
+        m = re.search(r"\b(\d{4})\b", s2.get_text(" ", strip=True))
+        if m:
+            ciiu = m.group(1)
+
+    representante = _extract_representante_from_soup(s2) or None
+
+    parsed = {
+        "razon_social": razon_social,
+        "sigla": sigla,
+        "fecha_matricula": fecha_iso,
+        "ciiu": ciiu,
+        "representante_legal": representante,
+    }
+    log.info({"event": "html_detail_parsed", "parsed": {k: v for k, v in parsed.items() if v}})
+    return parsed
 
 def fetch_detail_from_web_id(web_id: Any) -> Dict[str, Optional[str]]:
     try:
@@ -270,17 +426,20 @@ def fetch_detail_from_web_id(web_id: Any) -> Dict[str, Optional[str]]:
     if r.status_code != 200 or not r.text:
         return {}
     s2 = BeautifulSoup(r.text, "html.parser")
+
     razon_social = None
     for sel in ["h1", "h2", "p.font-rues-large.filtro__titulo"]:
         el = s2.select_one(sel)
         if el and el.get_text(strip=True):
             razon_social = el.get_text(strip=True)
             break
+
     sigla = find_value_by_label_in_soup(s2, r"^\s*sigla\s*$") or find_value_by_label_in_soup(s2, r"sigla")
     fecha = (find_value_by_label_in_soup(s2, r"fecha\s+de\s+matr[íi]cula")
              or find_value_by_label_in_soup(s2, r"fecha\s+de\s+inscripci[óo]n")
              or find_value_by_label_in_soup(s2, r"fecha\s+de\s+constituci[óo]n"))
     fecha_iso = _to_iso_date(fecha)
+
     ciiu = None
     a_code = s2.find("a", string=re.compile(r"^\s*\d{4}\s*$"))
     if a_code:
@@ -291,7 +450,9 @@ def fetch_detail_from_web_id(web_id: Any) -> Dict[str, Optional[str]]:
         m = re.search(r"\b(\d{4})\b", s2.get_text(" ", strip=True))
         if m:
             ciiu = m.group(1)
+
     representante = _extract_representante_from_soup(s2)
+
     parsed = {
         "razon_social": razon_social,
         "sigla": sigla,
@@ -302,18 +463,23 @@ def fetch_detail_from_web_id(web_id: Any) -> Dict[str, Optional[str]]:
     log.info({"event": "html_detail_by_id_parsed", "parsed": {k: v for k, v in parsed.items() if v}, "url": url})
     return parsed
 
-# -------- Endpoint principal --------
+# -------------------- Endpoint --------------------
 @app.post("/webhook")
 def receive_webhook():
     data = request.get_json(force=True, silent=False)
 
-    # 1) partner_id (igual que tu server anterior)
-    partner_id = data.get("id") or data.get("_id") or data.get("record_id") or ((data.get("data") or {}).get("id") if isinstance(data.get("data"), dict) else None)
+    # partner_id
+    partner_id = (
+        data.get("id")
+        or data.get("_id")
+        or data.get("record_id")
+        or ((data.get("data") or {}).get("id") if isinstance(data.get("data"), dict) else None)
+    )
     if not partner_id:
-        return jsonify({"error": "missing_partner_id", "detail": "El payload debe traer 'id' (o _id / record_id / data.id)"}), 400
+        return jsonify({"error": "missing_partner_id", "detail": "El payload debe traer 'id'"}), 400
     partner_id = int(partner_id)
 
-    # 2) NIT / VAT
+    # NIT / VAT
     raw_nit = extract_nit_from_payload(data)
     nit_digits = nit_base_sin_dv(raw_nit or "")
     if not nit_digits:
@@ -321,7 +487,7 @@ def receive_webhook():
 
     log.info({"event": "webhook_received", "partner_id": partner_id, "nit": raw_nit, "nit_digits": nit_digits})
 
-    # 3) (opcional) validar partner existe
+    # Validación de partner (opcional)
     try:
         exists, _ = read_fields(partner_id, ["id"])
         if not exists:
@@ -329,37 +495,37 @@ def receive_webhook():
     except Exception as e:
         log.warning(f"No se pudo validar existencia del partner: {e}")
 
-    # 4) Datos básicos via Socrata
+    # Socrata
     try:
         row = fetch_socrata(nit_digits)
     except requests.HTTPError:
         row = None
 
-    razon_social = None
-    sigla = None
-    fecha_matricula = None
-    ciiu = None
-    representante_legal = None
+    detalle: dict = {}
+    razon_social = sigla = fecha_matricula = ciiu = representante_legal = None
 
-    detalle: Dict[str, Any] = {}
     if row and row.get("codigo_camara") and row.get("matricula"):
         id_rm = build_id_rm(row["codigo_camara"], row["matricula"])
-        log.info({"event": "id_rm_built", "codigo_camara": row.get("codigo_camara"), "matricula": row.get("matricula"), "id_rm": id_rm})
+        log.info({"event": "id_rm_built", "id_rm": id_rm})
         if id_rm:
             detalle = fetch_rues_detalle_api(id_rm)
 
+    # Extraer de detalle
     if detalle:
         name_d, sigla_d = extract_name_sigla(detalle)
-        name_d = name_d or (detalle.get("razon_social") or "").strip() or None
-        sigla_d = sigla_d or (detalle.get("sigla") or "").strip() or None
-        razon_social = (row.get("razon_social") if row else None) or name_d
-        sigla = (row.get("sigla") if row else None) or sigla_d
+        razon_social = (row.get("razon_social") if row else None) or name_d or (detalle.get("razon_social") or "").strip() or None
+        sigla = (row.get("sigla") if row else None) or sigla_d or (detalle.get("sigla") or "").strip() or None
 
         extras = extract_rues_extras(detalle)
         fecha_matricula = extras.get("fecha_matricula")
         ciiu = extras.get("ciiu") or ciiu
         representante_legal = extras.get("representante_legal") or representante_legal
 
+        # completamos CIIU si falta
+        if not ciiu:
+            ciiu = find_first_ciiu_anywhere(detalle)
+
+        # Fallback HTML si falta algo clave
         if not (ciiu and representante_legal):
             web_id = detalle.get("id") or detalle.get("id_detalle") or detalle.get("id_detalle_web")
             if web_id is not None:
@@ -371,15 +537,20 @@ def receive_webhook():
                     ciiu = ciiu or html_by_id.get("ciiu")
                     representante_legal = representante_legal or html_by_id.get("representante_legal")
     else:
-        # Si Socrata no devolvió o API falló, intenta HTML directo de búsqueda (simple)
-        # Para no crecer más el código, aquí devolvemos 404 (puedes extender con search si lo necesitas)
-        log.warning({"event": "no_detalle_api"})
-        return jsonify({"error": "not_found", "detail": f"No encontré datos para NIT {nit_digits}"}), 404
+        # Último recurso: buscar por HTML (RUES web)
+        html_parsed = fetch_detail_from_html(nit_digits)
+        if html_parsed:
+            razon_social = razon_social or (row.get("razon_social") if row else None) or html_parsed.get("razon_social")
+            sigla = sigla or (row.get("sigla") if row else None) or html_parsed.get("sigla")
+            fecha_matricula = fecha_matricula or html_parsed.get("fecha_matricula")
+            ciiu = ciiu or html_parsed.get("ciiu")
+            representante_legal = representante_legal or html_parsed.get("representante_legal")
 
+    # Si no hay nada relevante:
     if not (razon_social or sigla or fecha_matricula or ciiu or representante_legal):
         return jsonify({"error": "not_found", "detail": f"No encontré datos para NIT {nit_digits}"}), 404
 
-    # 5) Escribir en Odoo en UNA sola llamada
+    # Preparar vals para Odoo (solo campos presentes)
     vals = {
         "name": razon_social,
         ODOO_FIELD_NOMBRE_COMERCIAL: sigla,
@@ -387,7 +558,6 @@ def receive_webhook():
         ODOO_FIELD_CIIU: ciiu,
         ODOO_FIELD_REPRESENTANTE: representante_legal,
     }
-    # Limpia None para no sobreescribir vacío si no llegó
     vals = {k: v for k, v in vals.items() if v is not None}
 
     log.info({"event": "odoo_write_multi_attempt", "partner_id": partner_id, "vals": vals})
@@ -407,6 +577,7 @@ def receive_webhook():
         "odoo_raw": odoo_response,
     }), 200
 
+# -------------------- Health --------------------
 @app.get("/health")
 def health():
     return jsonify({"status": "ok"}), 200
