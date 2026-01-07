@@ -1,0 +1,77 @@
+{
+  "all_fields_count": 415,
+  "matches": {
+    "comment": {
+      "readonly": false,
+      "required": false,
+      "string": "Notes",
+      "type": "html"
+    },
+    "x_studio_estado_formulario_crdito_comercial": {
+      "readonly": true,
+      "required": false,
+      "string": "Estado formulario crédito comercial",
+      "type": "selection"
+    },
+    "x_studio_lmite_de_crdito_comercial": {
+      "readonly": true,
+      "required": false,
+      "string": "Límite de crédito comercial",
+      "type": "float"
+    },
+    "x_studio_fecha_formulario_crdito_comercial": {
+      "readonly": true,
+      "required": false,
+      "string": "Fecha formulario crédito comercial",
+      "type": "date"
+    },
+    "x_studio_cdigo_ciiu": {
+      "readonly": false,
+      "required": false,
+      "string": "Código CIIU",
+      "type": "integer"
+    },
+    "x_studio_related_field_92s_1j3mncnkc": {
+      "readonly": true,
+      "required": false,
+      "string": "Terminos de Pago Comercial",
+      "type": "many2one"
+    },
+    "x_studio_fecha_de_matricula": {
+      "readonly": false,
+      "required": false,
+      "string": "Fecha de Matricula",
+      "type": "date"
+    },
+    "x_studio_cdigo_ciiu_1": {
+      "readonly": false,
+      "required": false,
+      "string": "Código CIIU",
+      "type": "many2one"
+    },
+    "x_studio_primera_carta_de_referencias_comerciales": {
+      "readonly": false,
+      "required": false,
+      "string": "Primera carta de referencias comerciales",
+      "type": "binary"
+    },
+    "x_studio_primera_carta_de_referencias_comerciales_filename": {
+      "readonly": false,
+      "required": false,
+      "string": "Filename for x_studio_binary_field_15i_1j59mro20",
+      "type": "char"
+    },
+    "x_studio_tipo_de_relacin_comercial": {
+      "readonly": false,
+      "required": false,
+      "string": "Tipo de relación comercial",
+      "type": "selection"
+    }
+  },
+  "current_fields_status": {
+    "l10n_co_edi_commercial_name": true,
+    "x_studio_fecha_de_matricula": true,
+    "x_studio_cdigo_ciiu_1": true,
+    "comment": true
+  }
+}

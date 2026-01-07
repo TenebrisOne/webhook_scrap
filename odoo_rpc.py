@@ -8,11 +8,12 @@ import os
 load_dotenv()  # Carga el archivo .env
 
 ODOO_JSONRPC = os.getenv("ODOO_JSONRPC")
-DB = os.getenv("DB")
-UID = int(os.getenv("UID"))
-PWD = os.getenv("PWD")
+ODOO_DB = os.getenv("ODOO_DB")
+ODOO_UID = int(os.getenv("ODOO_UID"))
+ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
 
 log = logging.getLogger("odoo_rpc")
+
 
 def _post(payload: dict) -> Tuple[bool, dict]:
     try:
@@ -29,7 +30,10 @@ def _post(payload: dict) -> Tuple[bool, dict]:
         return False, data["error"]
     return True, data
 
-def post_write(partner_id: int, field_name: str, url_value: Optional[str]) -> Tuple[bool, dict]:
+
+def post_write(
+    partner_id: int, field_name: str, url_value: Optional[str]
+) -> Tuple[bool, dict]:
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -37,11 +41,19 @@ def post_write(partner_id: int, field_name: str, url_value: Optional[str]) -> Tu
         "params": {
             "service": "object",
             "method": "execute_kw",
-            "args": [DB, UID, PWD, "res.partner", "write", [[partner_id], {field_name: url_value}]],
+            "args": [
+                ODOO_DB,
+                ODOO_UID,
+                ODOO_PASSWORD,
+                "res.partner",
+                "write",
+                [[partner_id], {field_name: url_value}],
+            ],
         },
     }
     log.info({"event": "odoo_post_write_payload", "payload": payload})
     return _post(payload)
+
 
 def read_fields(partner_id: int, fields: list[str]) -> Tuple[bool, dict]:
     payload = {
@@ -51,10 +63,18 @@ def read_fields(partner_id: int, fields: list[str]) -> Tuple[bool, dict]:
         "params": {
             "service": "object",
             "method": "execute_kw",
-            "args": [DB, UID, PWD, "res.partner", "read", [[partner_id], fields]],
+            "args": [
+                ODOO_DB,
+                ODOO_UID,
+                ODOO_PASSWORD,
+                "res.partner",
+                "read",
+                [[partner_id], fields],
+            ],
         },
     }
     return _post(payload)
+
 
 def post_write_multi(partner_id: int, vals: dict) -> Tuple[bool, dict]:
     """
@@ -70,10 +90,19 @@ def post_write_multi(partner_id: int, vals: dict) -> Tuple[bool, dict]:
         "params": {
             "service": "object",
             "method": "execute_kw",
-            "args": [DB, UID, PWD, "res.partner", "write", [[partner_id], vals]],
+            "args": [
+                ODOO_DB,
+                ODOO_UID,
+                ODOO_PASSWORD,
+                "res.partner",
+                "write",
+                [[partner_id], vals],
+            ],
         },
     }
-    logging.getLogger("odoo_rpc").info({"event": "odoo_post_write_multi_payload", "payload": payload})
+    logging.getLogger("odoo_rpc").info(
+        {"event": "odoo_post_write_multi_payload", "payload": payload}
+    )
     try:
         r = requests.post(ODOO_JSONRPC, json=payload, timeout=20)
         status = r.status_code
@@ -92,16 +121,23 @@ def post_write_multi(partner_id: int, vals: dict) -> Tuple[bool, dict]:
 
 if __name__ == "__main__":
     import argparse, json
+
     parser = argparse.ArgumentParser(description="Prueba de funciones de Odoo RPC")
-    parser.add_argument("--partner-id", type=int, required=True, help="ID del partner en Odoo")
-    parser.add_argument("--field", required=False, help="Nombre del campo a escribir/leer")
+    parser.add_argument(
+        "--partner-id", type=int, required=True, help="ID del partner en Odoo"
+    )
+    parser.add_argument(
+        "--field", required=False, help="Nombre del campo a escribir/leer"
+    )
     parser.add_argument("--value", default="", help="Valor a escribir en el campo")
     parser.add_argument("--read", action="store_true")
     parser.add_argument("--multi", action="store_true")
     args = parser.parse_args()
 
     if args.read:
-        ok_r, r_raw = read_fields(args.partner_id, [args.field] if args.field else ["name"])
+        ok_r, r_raw = read_fields(
+            args.partner_id, [args.field] if args.field else ["name"]
+        )
         print(json.dumps({"ok_read": ok_r, "read_raw": r_raw}, indent=2))
     elif args.multi:
         ok_w, w_raw = post_write_multi(args.partner_id, {"name": args.value})

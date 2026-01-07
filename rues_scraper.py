@@ -834,9 +834,30 @@ def receive_webhook():
         {"event": "odoo_write_multi_attempt", "partner_id": partner_id, "vals": vals}
     )
     ok_write, odoo_response = post_write_multi(partner_id, vals)
+
+    # Enhanced logging to diagnose production issues
     log.info(
-        {"event": "odoo_write_multi_result", "partner_id": partner_id, "ok": ok_write}
+        {
+            "event": "odoo_write_multi_result",
+            "partner_id": partner_id,
+            "ok": ok_write,
+            "full_response": odoo_response,  # See complete Odoo response
+            "vals_sent": vals,  # Confirm what we attempted to write
+            "field_count": len(vals),  # How many fields were in the request
+        }
     )
+
+    # If write failed, log detailed error
+    if not ok_write:
+        log.error(
+            {
+                "event": "odoo_write_failed",
+                "partner_id": partner_id,
+                "error_details": odoo_response,
+                "vals_attempted": vals,
+                "fields_attempted": list(vals.keys()),
+            }
+        )
 
     return (
         jsonify(
